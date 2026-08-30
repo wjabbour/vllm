@@ -51,7 +51,10 @@ def _check_selection(top_bf16: set[int], top_fp8: set[int]) -> None:
     assert len(top_bf16 & top_fp8) >= TOPK - 2
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm only",
+)
 @torch.inference_mode()
 def test_fp8_index_cache_decode_topk_matches_bf16() -> None:
     dev = "cuda"
@@ -80,7 +83,10 @@ def test_fp8_index_cache_decode_topk_matches_bf16() -> None:
     _check_selection(select(keys), select(keys.to(torch.float8_e4m3fn)))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm only",
+)
 @torch.inference_mode()
 def test_fp8_index_cache_prefill_topk_matches_bf16() -> None:
     dev = "cuda"
