@@ -169,53 +169,6 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
   return make_float4(dat0, dat1, dat2, dat3);
 }
 
-template <typename scalar_t, typename scalar2_t, int ROWS_PER_BLOCK>
-__device__ __forceinline__ void load_tile(
-    const float4* mat_f4, const scalar2_t* vec_h2, int thread_id,
-    int block_base_addr, int K, float4 mat_chunk[ROWS_PER_BLOCK],
-    scalar2_t& vec_h2x, scalar2_t& vec_h2y, scalar2_t& vec_h2z,
-    scalar2_t& vec_h2w) {
-  constexpr int ELEMS_PER_FLOAT4 = sizeof(float4) / sizeof(scalar_t);
-  constexpr int PAIRS_PER_FLOAT4 = sizeof(float4) / sizeof(scalar2_t);
-  if (thread_id * ELEMS_PER_FLOAT4 < K) {
-#pragma unroll
-    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
-      // block_base_addr: first float4 of row 0 for this block
-      // thread_id: this thread's column chunk within a row
-      // K / ELEMS_PER_FLOAT4 * i: row stride to row i
-      mat_chunk[i] = load_ntmprl(
-          &mat_f4[block_base_addr + thread_id + K / ELEMS_PER_FLOAT4 * i]);
-    }
-    vec_h2x = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 0];
-    vec_h2y = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 1];
-    vec_h2z = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 2];
-    vec_h2w = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 3];
-  }
-}
-
-template <typename scalar2_t>
-__device__ __forceinline__ float dot_row(scalar2_t* mat_row_ptr,
-                                         scalar2_t vec_h2x, scalar2_t vec_h2y,
-                                         scalar2_t vec_h2z, scalar2_t vec_h2w) {
-  scalar2_t acc_h2 = __hmul2(*mat_row_ptr, vec_h2x);
-  acc_h2 = __hfma2(*(mat_row_ptr + 1), vec_h2y, acc_h2);
-  acc_h2 = __hfma2(*(mat_row_ptr + 2), vec_h2z, acc_h2);
-  acc_h2 = __hfma2(*(mat_row_ptr + 3), vec_h2w, acc_h2);
-  float2 sum = __s22float2(acc_h2);
-  return sum.x + sum.y;
-}
-
-template <int ROWS_PER_BLOCK>
-__device__ __forceinline__ void warp_reduce(float acc[ROWS_PER_BLOCK]) {
-#pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-#pragma unroll
-    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
-      acc[i] += __shfl_xor(acc[i], mask);
-    }
-  }
-}
-
 template <typename scalar_t, int ROWS_PER_BLOCK>
 __global__ void LLGemm1_kernel(const scalar_t* mat, const scalar_t* vec,
                                scalar_t* out, const int K) {
@@ -254,24 +207,45 @@ __global__ void LLGemm1_kernel(const scalar_t* mat, const scalar_t* vec,
   // from mat and one float4 from vec, then computes a partial dot product per
   // row into acc[].
   //
-  // Threads beyond K/8 diverge in load_tile's if guard (skipping the load) and
-  // are zeroed by the ternary below; their dot_row result is discarded.
-  load_tile<scalar_t, scalar2_t, ROWS_PER_BLOCK>(
-      mat_f4, vec_h2, thread_id, block_base_addr, K, mat_chunk, vec_h2x,
-      vec_h2y, vec_h2z, vec_h2w);
+  // Threads beyond K/8 skip the load (if guard) and are zeroed by the ternary
+  // below; their partial-dot result is discarded.
+  if (thread_id * ELEMS_PER_FLOAT4 < K) {
+#pragma unroll
+    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
+      // block_base_addr: first float4 of row 0 for this block
+      // thread_id: this thread's column chunk within a row
+      // K / ELEMS_PER_FLOAT4 * i: row stride to row i
+      mat_chunk[i] = load_ntmprl(
+          &mat_f4[block_base_addr + thread_id + K / ELEMS_PER_FLOAT4 * i]);
+    }
+    vec_h2x = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 0];
+    vec_h2y = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 1];
+    vec_h2z = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 2];
+    vec_h2w = vec_h2[thread_id * PAIRS_PER_FLOAT4 + 3];
+  }
 
   auto mat_h2_ptr = reinterpret_cast<scalar2_t*>(&mat_chunk);
 
 #pragma unroll
   for (int i = 0; i < ROWS_PER_BLOCK; i++) {
-    float val = dot_row(mat_h2_ptr + i * PAIRS_PER_FLOAT4, vec_h2x, vec_h2y,
-                        vec_h2z, vec_h2w);
-    acc[i] = (thread_id * ELEMS_PER_FLOAT4 < K ? val : 0.f);
+    scalar2_t* row_ptr = mat_h2_ptr + i * PAIRS_PER_FLOAT4;
+    scalar2_t acc_h2 = __hmul2(*row_ptr, vec_h2x);
+    acc_h2 = __hfma2(*(row_ptr + 1), vec_h2y, acc_h2);
+    acc_h2 = __hfma2(*(row_ptr + 2), vec_h2z, acc_h2);
+    acc_h2 = __hfma2(*(row_ptr + 3), vec_h2w, acc_h2);
+    float2 sum = __s22float2(acc_h2);
+    acc[i] = (thread_id * ELEMS_PER_FLOAT4 < K ? sum.x + sum.y : 0.f);
   }
 
   // Stage 2: intra-warp butterfly — reduces each acc[i] across all lanes in the
   // warp.
-  warp_reduce<ROWS_PER_BLOCK>(acc);
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+#pragma unroll
+    for (int i = 0; i < ROWS_PER_BLOCK; i++) {
+      acc[i] += __shfl_xor(acc[i], mask);
+    }
+  }
 
   // All lanes hold the same acc[] after the butterfly; lanes
   // 0..ROWS_PER_BLOCK-1 each write their row's partial sum to smem in parallel
