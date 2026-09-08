@@ -263,8 +263,15 @@ __global__ void LLGemm1_kernel(const scalar_t* mat, const scalar_t* vec,
   // THREADS_PER_ROW_GROUP (e.g. large K on WARP_SIZE=32 GPUs).
   const int num_warps = blockDim.x / WARP_SIZE;
   if (row_group_id < ROWS_PER_BLOCK) {
-    float partial = 0.f;
-    for (int w = row_group_thread_id; w < num_warps;
+    // Common case (num_warps <= THREADS_PER_ROW_GROUP, i.e. every
+    // WARP_SIZE=64 / K<=8192 config): a single predicated smem load, matching
+    // the pre-refactor cost. The strided loop only spins on WARP_SIZE=32 with
+    // large K, where num_warps exceeds THREADS_PER_ROW_GROUP.
+    float partial = (row_group_thread_id < num_warps)
+                        ? reduction_smem[row_group_id][row_group_thread_id]
+                        : 0.f;
+#pragma unroll
+    for (int w = row_group_thread_id + THREADS_PER_ROW_GROUP; w < num_warps;
          w += THREADS_PER_ROW_GROUP) {
       partial += reduction_smem[row_group_id][w];
     }
