@@ -170,8 +170,9 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
 }
 
 template <typename scalar_t, int ROWS_PER_BLOCK>
-__global__ void LLGemm1_kernel(const scalar_t* mat, const scalar_t* vec,
-                               scalar_t* out, const int K) {
+__global__ void __launch_bounds__(1024, 2)
+    LLGemm1_kernel(const scalar_t* mat, const scalar_t* vec, scalar_t* out,
+                   const int K) {
   using scalar2_t = typename scalar2<scalar_t>::type;
   // Packing constants: data is stored as packed halves loaded via float4.
   constexpr int ELEMS_PER_FLOAT4 =
