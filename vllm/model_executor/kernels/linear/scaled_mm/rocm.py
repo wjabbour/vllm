@@ -25,7 +25,7 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
     bias: torch.Tensor,
 ) -> torch.Tensor:
     if (
-        A.shape[0] <= 4
+        A.shape[0] in (1, 2, 3, 4, 8, 16)  # exact N values wvSplitKQ is built for
         and B.shape[0] % 16 == 0  # M TODO: needed?
         and B.shape[1] % 16 == 0  # K
         and ((bias is None) or (bias.dtype == out_dtype))

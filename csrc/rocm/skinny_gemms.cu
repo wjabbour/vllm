@@ -2534,6 +2534,12 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
         case 4:
           WVSPLITKQ(16, 2, 2, 1, 1, 4)
           break;
+        case 8:
+          WVSPLITKQ(16, 2, 2, 1, 1, 8)
+          break;
+        case 16:
+          WVSPLITKQ(16, 2, 2, 1, 1, 16)
+          break;
         default:
           throw std::runtime_error(
               "Unsupported N value: " + std::to_string(M_in) + "," +
